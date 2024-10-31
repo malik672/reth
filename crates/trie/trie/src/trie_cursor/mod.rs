@@ -6,10 +6,12 @@ use reth_storage_errors::db::DatabaseError;
 mod in_memory;
 
 /// Cursor for iterating over a subtrie.
-mod subnode;
+pub mod subnode;
 
 /// Noop trie cursor implementations.
 pub mod noop;
+
+pub mod subnode_opt;
 
 pub use self::{in_memory::*, subnode::CursorSubNode};
 

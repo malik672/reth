@@ -33,7 +33,7 @@ impl TrieUpdates {
 
     /// Returns a reference to updated storage tries.
     pub const fn storage_tries_ref(&self) -> &HashMap<B256, StorageTrieUpdates> {
-        &self.storage_tries
+        &self.storage_tries 
     }
 
     /// Extends the trie updates.
