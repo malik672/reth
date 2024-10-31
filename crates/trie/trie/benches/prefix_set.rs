@@ -1,331 +1,144 @@
-#![allow(missing_docs, unreachable_pub)]
-use criterion::{
-    black_box, criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
-};
-use proptest::{
-    prelude::*,
-    strategy::ValueTree,
-    test_runner::{basic_result_cache, TestRunner},
-};
+#![allow(missing_docs)]
+use std::time::Duration;
+
+use alloy_primitives::B256;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use proptest::{prelude::*, strategy::ValueTree, test_runner::TestRunner};
 use reth_trie::{
-    prefix_set::{PrefixSet, PrefixSetMut},
-    Nibbles,
+    trie_cursor::{subnode, subnode_opt, CursorSubNode},
+    BranchNodeCompact, Nibbles, TrieMask,
 };
-use std::collections::BTreeSet;
 
-/// Abstraction for aggregating nibbles and freezing it to a type
-/// that can be later used for benching.
-pub trait PrefixSetMutAbstraction: Default {
-    type Frozen;
-    fn insert(&mut self, key: Nibbles);
-    fn freeze(self) -> Self::Frozen;
-}
 
-/// Abstractions used for benching
-pub trait PrefixSetAbstraction: Default {
-    fn contains(&mut self, key: Nibbles) -> bool;
-}
-
-impl PrefixSetMutAbstraction for PrefixSetMut {
-    type Frozen = PrefixSet;
-
-    fn insert(&mut self, key: Nibbles) {
-        Self::insert(self, key)
-    }
-
-    fn freeze(self) -> Self::Frozen {
-        Self::freeze(self)
-    }
-}
-
-impl PrefixSetAbstraction for PrefixSet {
-    fn contains(&mut self, key: Nibbles) -> bool {
-        Self::contains(self, &key)
-    }
-}
-
-pub fn prefix_set_lookups(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Prefix Set Lookups");
-
-    for size in [10, 100, 1_000, 10_000] {
-        let test_data = generate_test_data(size);
-
-        use implementations::*;
-        prefix_set_bench::<BTreeAnyPrefixSet>(
-            &mut group,
-            "`BTreeSet` with `Iterator::any` lookup",
-            test_data.clone(),
-        );
-        prefix_set_bench::<BTreeRangeLastCheckedPrefixSet>(
-            &mut group,
-            "`BTreeSet` with `BTreeSet::range` lookup",
-            test_data.clone(),
-        );
-        prefix_set_bench::<VecCursorPrefixSet>(
-            &mut group,
-            "`Vec` with custom cursor lookup",
-            test_data.clone(),
-        );
-        prefix_set_bench::<VecBinarySearchPrefixSet>(
-            &mut group,
-            "`Vec` with binary search lookup",
-            test_data.clone(),
-        );
-    }
-}
-
-fn prefix_set_bench<T>(
-    group: &mut BenchmarkGroup<'_, WallTime>,
-    description: &str,
-    (preload, input, expected): (Vec<Nibbles>, Vec<Nibbles>, Vec<bool>),
-) where
-    T: PrefixSetMutAbstraction,
-    T::Frozen: PrefixSetAbstraction,
-{
-    let setup = || {
-        let mut prefix_set = T::default();
-        for key in &preload {
-            prefix_set.insert(key.clone());
+fn generate_test_data(size: usize) -> Vec<(Nibbles, Option<BranchNodeCompact>)> {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(1000));
+    
+   
+    let nibbles_strategy = prop::collection::vec(0u8..16, 1..32)
+        .prop_map(|v| Nibbles::from_nibbles_unchecked(v));
+    
+    
+    let branch_node_strategy = (
+        any::<u16>(), 
+        any::<u16>(), 
+        any::<u16>(), 
+        any::<bool>(), 
+    ).prop_map(|(mut state, mut tree, mut hash, has_root)| {
+        let mut node = BranchNodeCompact::default();
+        
+        state |= 1;
+        tree |= 1;
+        hash |= 1;
+        
+        node.state_mask = TrieMask::new(state);
+        node.tree_mask = TrieMask::new(tree);
+        node.hash_mask = TrieMask::new(hash);
+        
+        if has_root {
+            node.root_hash = Some(B256::random());
         }
-        (prefix_set.freeze(), input.clone(), expected.clone())
-    };
-
-    let group_id = format!(
-        "prefix set | preload size: {} | input size: {} | {}",
-        preload.len(),
-        input.len(),
-        description
-    );
-    group.bench_function(group_id, |b| {
-        b.iter_with_setup(setup, |(mut prefix_set, input, expected)| {
-            for (idx, key) in input.into_iter().enumerate() {
-                let result = black_box(prefix_set.contains(key));
-                assert_eq!(result, expected[idx]);
-            }
-        });
+        Some(node)
     });
+
+    (0..size)
+        .map(|_| {
+            let nibbles = nibbles_strategy.new_tree(&mut runner).unwrap().current();
+            let node = branch_node_strategy.new_tree(&mut runner).unwrap().current();
+            (nibbles, node)
+        })
+        .collect()
 }
 
-fn generate_test_data(size: usize) -> (Vec<Nibbles>, Vec<Nibbles>, Vec<bool>) {
-    use prop::collection::vec;
+pub fn bench_cursor_subnode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("CursorSubNode");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(100);
+    group.warm_up_time(Duration::from_secs(2));
 
-    let config = ProptestConfig { result_cache: basic_result_cache, ..Default::default() };
-    let mut runner = TestRunner::new(config);
 
-    let vec_of_nibbles = |range| vec(any_with::<Nibbles>(range), size);
-    let mut preload = vec_of_nibbles(32usize.into()).new_tree(&mut runner).unwrap().current();
-    preload.dedup();
-    preload.sort();
-
-    let mut input = vec_of_nibbles((0..=32usize).into()).new_tree(&mut runner).unwrap().current();
-    input.dedup();
-    input.sort();
-
-    let expected = input
-        .iter()
-        .map(|prefix| preload.iter().any(|key| key.has_prefix(prefix)))
-        .collect::<Vec<_>>();
-    (preload, input, expected)
-}
-
-criterion_group!(prefix_set, prefix_set_lookups);
-criterion_main!(prefix_set);
-
-mod implementations {
-    use super::*;
-    use std::ops::Bound;
-
-    #[derive(Default)]
-    pub struct BTreeAnyPrefixSet {
-        keys: BTreeSet<Nibbles>,
-    }
-
-    impl PrefixSetMutAbstraction for BTreeAnyPrefixSet {
-        type Frozen = Self;
-
-        fn insert(&mut self, key: Nibbles) {
-            self.keys.insert(key);
-        }
-
-        fn freeze(self) -> Self::Frozen {
-            self
-        }
-    }
-
-    impl PrefixSetAbstraction for BTreeAnyPrefixSet {
-        fn contains(&mut self, key: Nibbles) -> bool {
-            self.keys.iter().any(|k| k.has_prefix(&key))
-        }
-    }
-
-    #[derive(Default)]
-    pub struct BTreeRangeLastCheckedPrefixSet {
-        keys: BTreeSet<Nibbles>,
-        last_checked: Option<Nibbles>,
-    }
-
-    impl PrefixSetMutAbstraction for BTreeRangeLastCheckedPrefixSet {
-        type Frozen = Self;
-
-        fn insert(&mut self, key: Nibbles) {
-            self.keys.insert(key);
-        }
-
-        fn freeze(self) -> Self::Frozen {
-            self
-        }
-    }
-
-    impl PrefixSetAbstraction for BTreeRangeLastCheckedPrefixSet {
-        fn contains(&mut self, prefix: Nibbles) -> bool {
-            let range = match self.last_checked.as_ref() {
-                // presumably never hit
-                Some(last) if prefix < *last => (Bound::Unbounded, Bound::Excluded(last)),
-                Some(last) => (Bound::Included(last), Bound::Unbounded),
-                None => (Bound::Unbounded, Bound::Unbounded),
-            };
-            for key in self.keys.range::<Nibbles, _>(range) {
-                if key.has_prefix(&prefix) {
-                    self.last_checked = Some(prefix);
-                    return true
-                }
-
-                if key > &prefix {
-                    self.last_checked = Some(prefix);
-                    return false
-                }
-            }
-
-            false
-        }
-    }
-
-    #[derive(Default)]
-    pub struct VecBinarySearchPrefixSet {
-        keys: Vec<Nibbles>,
-        sorted: bool,
-    }
-
-    impl PrefixSetMutAbstraction for VecBinarySearchPrefixSet {
-        type Frozen = Self;
-
-        fn insert(&mut self, key: Nibbles) {
-            self.sorted = false;
-            self.keys.push(key);
-        }
-
-        fn freeze(self) -> Self::Frozen {
-            self
-        }
-    }
-
-    impl PrefixSetAbstraction for VecBinarySearchPrefixSet {
-        fn contains(&mut self, prefix: Nibbles) -> bool {
-            if !self.sorted {
-                self.keys.sort();
-                self.sorted = true;
-            }
-
-            match self.keys.binary_search(&prefix) {
-                Ok(_) => true,
-                Err(idx) => match self.keys.get(idx) {
-                    Some(key) => key.has_prefix(&prefix),
-                    None => false, // prefix > last key
-                },
-            }
-        }
-    }
-
-    #[derive(Default)]
-    pub struct VecCursorPrefixSet {
-        keys: Vec<Nibbles>,
-        sorted: bool,
-        index: usize,
-    }
-
-    impl PrefixSetMutAbstraction for VecCursorPrefixSet {
-        type Frozen = Self;
-
-        fn insert(&mut self, nibbles: Nibbles) {
-            self.sorted = false;
-            self.keys.push(nibbles);
-        }
-
-        fn freeze(self) -> Self::Frozen {
-            self
-        }
-    }
-
-    impl PrefixSetAbstraction for VecCursorPrefixSet {
-        fn contains(&mut self, prefix: Nibbles) -> bool {
-            if !self.sorted {
-                self.keys.sort();
-                self.sorted = true;
-            }
-
-            let prefix = prefix;
-
-            while self.index > 0 && self.keys[self.index] > prefix {
-                self.index -= 1;
-            }
-
-            for (idx, key) in self.keys[self.index..].iter().enumerate() {
-                if key.has_prefix(&prefix) {
-                    self.index += idx;
-                    return true
-                }
-
-                if key > &prefix {
-                    self.index += idx;
-                    return false
-                }
-            }
-
-            false
-        }
-    }
-
-    #[derive(Default)]
-    pub struct VecBinarySearchWithLastFoundPrefixSet {
-        keys: Vec<Nibbles>,
-        last_found_idx: usize,
-        sorted: bool,
-    }
-
-    impl PrefixSetMutAbstraction for VecBinarySearchWithLastFoundPrefixSet {
-        type Frozen = Self;
-
-        fn insert(&mut self, key: Nibbles) {
-            self.sorted = false;
-            self.keys.push(key);
-        }
-
-        fn freeze(self) -> Self::Frozen {
-            self
-        }
-    }
-
-    impl PrefixSetAbstraction for VecBinarySearchWithLastFoundPrefixSet {
-        fn contains(&mut self, prefix: Nibbles) -> bool {
-            if !self.sorted {
-                self.keys.sort();
-                self.sorted = true;
-            }
-
-            while self.last_found_idx > 0 && self.keys[self.last_found_idx] > prefix {
-                self.last_found_idx -= 1;
-            }
-
-            match self.keys[self.last_found_idx..].binary_search(&prefix) {
-                Ok(_) => true,
-                Err(idx) => match self.keys.get(idx) {
-                    Some(key) => {
-                        self.last_found_idx = idx;
-                        key.has_prefix(&prefix)
+    for size in [10, 100, 1000].iter() {
+        let test_data = generate_test_data(*size);
+        
+        group.bench_function(BenchmarkId::new("v1/creation", size), |b| {
+            b.iter_batched(
+                || test_data.clone(),
+                |data| {
+                    for (key, node) in data {
+                        black_box(subnode::CursorSubNode::new(key, node));
                     }
-                    None => false, // prefix > last key
                 },
-            }
-        }
+                criterion::BatchSize::LargeInput,
+            )
+        });
+
+        group.bench_function(BenchmarkId::new("v2/creation", size), |b| {
+            b.iter_batched(
+                || test_data.clone(),
+                |data| {
+                    for (key, node) in data {
+                        black_box(subnode_opt::CursorSubNode::new(key, node));
+                    }
+                },
+                criterion::BatchSize::LargeInput,
+            )
+        });
+
+ 
+        let v1_cursors: Vec<_> = test_data
+            .iter()
+            .map(|(k, n)| subnode::CursorSubNode::new(k.clone(), n.clone()))
+            .collect();
+        let v2_cursors: Vec<_> = test_data
+            .iter()
+            .map(|(k, n)| subnode_opt::CursorSubNode::new(k.clone(), n.clone()))
+            .collect();
+
+       
+        group.bench_function(BenchmarkId::new("v1/flags", size), |b| {
+            b.iter(|| {
+                for cursor in &v1_cursors {
+                    black_box(cursor.state_flag());
+                    black_box(cursor.tree_flag());
+                    black_box(cursor.hash_flag());
+                }
+            })
+        });
+
+        group.bench_function(BenchmarkId::new("v2/flags", size), |b| {
+            b.iter(|| {
+                for cursor in &v2_cursors {
+                    black_box(cursor.state_flag());
+                    black_box(cursor.tree_flag());
+                    black_box(cursor.hash_flag());
+                }
+            })
+        });
+
+        group.bench_function(BenchmarkId::new("v1/full_key_access", size), |b| {
+            b.iter(|| {
+                for cursor in &v1_cursors {
+                    black_box(cursor.full_key());
+                }
+            })
+        });
+
+        group.bench_function(BenchmarkId::new("v2/full_key_access", size), |b| {
+            b.iter(|| {
+                for cursor in &v2_cursors {
+                    black_box(cursor.full_key());
+                }
+            })
+        });
     }
+
+    group.finish();
 }
+
+criterion_group!(
+    name = benches;
+    config = Criterion::default()
+        .significance_level(0.01)
+        .noise_threshold(0.02);
+    targets = bench_cursor_subnode
+);
+criterion_main!(benches);

@@ -46,6 +46,7 @@ serde = { workspace = true, optional = true }
 
 # `serde-bincode-compat` feature
 serde_with = { workspace = true, optional = true }
+flamescope = "0.1.3"
 
 [dev-dependencies]
 # reth
