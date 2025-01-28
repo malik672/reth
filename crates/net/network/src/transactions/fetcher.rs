@@ -133,6 +133,7 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
             max_capacity_cache_txns_pending_fetch,
             ..
         } = *config;
+        
 
         let info = config.clone().into();
 
