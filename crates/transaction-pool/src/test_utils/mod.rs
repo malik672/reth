@@ -6,7 +6,7 @@ use std::ops::Deref;
 mod tx_gen;
 pub use tx_gen::*;
 
-mod mock;
+pub mod mock;
 pub use mock::*;
 
 mod pool;
