@@ -6,10 +6,11 @@ use crate::{
     },
     Priority, SubPoolLimit, TransactionOrdering, ValidPoolTransaction,
 };
+
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap},
+    collections::{hash_map::Entry, BTreeMap, BinaryHeap, HashSet},
     ops::Bound::Unbounded,
     sync::Arc,
 };
@@ -104,8 +105,19 @@ impl<T: TransactionOrdering> PendingPool<T> {
     /// which case the transaction's subgraph is also automatically marked invalid, See (1.).
     /// Invalid transactions are skipped.
     pub fn best(&self) -> BestTransactions<T> {
+        let independent_transactions: Vec<PendingTransaction<T>> =
+            self.independent_transactions.values().cloned().collect();
+
+        // Create the lookup set from independent transactions
+        let independent_lookup: HashSet<TransactionId> =
+            independent_transactions.iter().map(|tx| *tx.transaction.id()).collect();
+
+        // Convert to BinaryHeap
+        let independent: BinaryHeap<PendingTransaction<T>> =
+            independent_transactions.into_iter().collect();
         BestTransactions {
             all: self.by_id.clone(),
+            independent_lookup,
             independent: self.independent_transactions.values().cloned().collect(),
             invalid: Default::default(),
             new_transaction_receiver: Some(self.new_transaction_notifier.subscribe()),
@@ -147,7 +159,10 @@ impl<T: TransactionOrdering> PendingPool<T> {
             let tx_id = *tx.id();
             let transaction = PendingTransaction { submission_id, transaction: tx, priority };
             if best.ancestor(&tx_id).is_none() {
-                best.independent.insert(transaction.clone());
+                // Update: use push() instead of insert() and manage lookup set
+                if best.independent_lookup.insert(tx_id) {
+                    best.independent.push(transaction.clone());
+                }
             }
             best.all.insert(tx_id, transaction);
         }
@@ -176,7 +191,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         blob_fee: u128,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
         // Create a collection for removed transactions.
-        let mut removed = Vec::with_capacity(self.len());
+        let mut removed = Vec::new();
 
         // Drain and iterate over all transactions.
         let mut transactions_iter = self.clear_transactions().into_iter().peekable();
@@ -218,7 +233,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         base_fee: u64,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
         // Create a collection for removed transactions.
-        let mut removed = Vec::with_capacity(self.len());
+        let mut removed = Vec::new();
 
         // Drain and iterate over all transactions.
         let mut transactions_iter = self.clear_transactions().into_iter().peekable();
