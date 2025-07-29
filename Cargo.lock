@@ -10494,6 +10494,7 @@ dependencies = [
 name = "reth-transaction-pool"
 version = "1.6.0"
 dependencies = [
+ "ahash",
  "alloy-consensus",
  "alloy-eips",
  "alloy-primitives",
