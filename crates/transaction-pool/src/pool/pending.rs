@@ -6,6 +6,7 @@ use crate::{
     },
     Priority, SubPoolLimit, TransactionOrdering, ValidPoolTransaction,
 };
+use revm_primitives::HashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     cmp::Ordering,
@@ -34,7 +35,7 @@ pub struct PendingPool<T: TransactionOrdering> {
     /// This way we can determine when transactions were submitted to the pool.
     submission_id: u64,
     /// _All_ Transactions that are currently inside the pool grouped by their identifier.
-    by_id: BTreeMap<TransactionId, PendingTransaction<T>>,
+    by_id: HashMap<TransactionId, PendingTransaction<T>>,
     /// The highest nonce transactions for each sender - like the `independent` set, but the
     /// highest instead of lowest nonce.
     highest_nonces: FxHashMap<SenderId, PendingTransaction<T>>,
@@ -78,7 +79,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
     /// # Returns
     ///
     /// Returns all transactions by id.
-    fn clear_transactions(&mut self) -> BTreeMap<TransactionId, PendingTransaction<T>> {
+    fn clear_transactions(&mut self) -> HashMap<TransactionId, PendingTransaction<T>> {
         self.independent_transactions.clear();
         self.highest_nonces.clear();
         self.size_of.reset();
@@ -176,7 +177,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         blob_fee: u128,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
         // Create a collection for removed transactions.
-        let mut removed = Vec::new();
+        let mut removed = Vec::with_capacity(self.len());
 
         // Drain and iterate over all transactions.
         let mut transactions_iter = self.clear_transactions().into_iter().peekable();
@@ -525,15 +526,23 @@ impl<T: TransactionOrdering> PendingPool<T> {
         self.iter_txs_by_sender(sender).copied().collect()
     }
 
+    // /// Returns an iterator over all transaction with the sender id
+    // pub(crate) fn iter_txs_by_sender(
+    //     &self,
+    //     sender: SenderId,
+    // ) -> impl Iterator<Item = &TransactionId> + '_ {
+    //     self.by_id
+    //         .range((sender.start_bound(), Unbounded))
+    //         .take_while(move |(other, _)| sender == other.sender)
+    //         .map(|(tx_id, _)| tx_id)
+    // }
+
     /// Returns an iterator over all transaction with the sender id
     pub(crate) fn iter_txs_by_sender(
         &self,
         sender: SenderId,
     ) -> impl Iterator<Item = &TransactionId> + '_ {
-        self.by_id
-            .range((sender.start_bound(), Unbounded))
-            .take_while(move |(other, _)| sender == other.sender)
-            .map(|(tx_id, _)| tx_id)
+        self.by_id.iter().filter(move |(tx_id, _)| tx_id.sender == sender).map(|(tx_id, _)| tx_id)
     }
 
     /// Retrieves a transaction with the given ID from the pool, if it exists.

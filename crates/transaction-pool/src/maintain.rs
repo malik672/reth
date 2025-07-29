@@ -435,7 +435,7 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
                     chain_spec.blob_params_at_timestamp(tip.timestamp()),
                 );
 
-                let first_block = blocks.first();
+                let first_block = blocks.first(); 
                 trace!(
                     target: "txpool",
                     first = first_block.number(),
