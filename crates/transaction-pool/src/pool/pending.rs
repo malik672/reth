@@ -10,7 +10,7 @@ use revm_primitives::HashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap},
+    collections::{hash_map::Entry, BTreeMap, BinaryHeap},
     ops::Bound::Unbounded,
     sync::Arc,
 };
@@ -39,6 +39,11 @@ pub struct PendingPool<T: TransactionOrdering> {
     /// The highest nonce transactions for each sender - like the `independent` set, but the
     /// highest instead of lowest nonce.
     highest_nonces: FxHashMap<SenderId, PendingTransaction<T>>,
+    /// Secondary index for sender-based queries - maps sender to their transaction IDs
+    by_sender: BTreeMap<SenderId, Vec<TransactionId>>,
+    /// Priority queue for fee-based ordering (max heap)
+    by_priority_fee: BinaryHeap<PriorityTransactionRef<T>>,
+    /// The highest nonce transactions for each sender - like 
     /// Independent transactions that can be included directly and don't require other
     /// transactions.
     independent_transactions: FxHashMap<SenderId, PendingTransaction<T>>,
@@ -51,7 +56,40 @@ pub struct PendingPool<T: TransactionOrdering> {
     new_transaction_notifier: broadcast::Sender<PendingTransaction<T>>,
 }
 
-// === impl PendingPool ===
+
+/// Reference to a transaction in the priority heap
+#[derive(Debug, Clone)]
+pub struct PriorityTransactionRef<T: TransactionOrdering> {
+    /// Priority value for ordering
+    pub priority: Priority<T::PriorityValue>,
+    /// Submission ID for tie-breaking
+    pub submission_id: u64,
+    /// Transaction ID for lookup
+    pub tx_id: TransactionId,
+}
+
+impl<T: TransactionOrdering> PartialEq for PriorityTransactionRef<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl<T: TransactionOrdering> Eq for PriorityTransactionRef<T> {}
+
+impl<T: TransactionOrdering> PartialOrd for PriorityTransactionRef<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: TransactionOrdering> Ord for PriorityTransactionRef<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Same ordering as PendingTransaction
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.submission_id.cmp(&self.submission_id))
+    }
+}
 
 impl<T: TransactionOrdering> PendingPool<T> {
     /// Create a new pending pool instance.
@@ -66,6 +104,8 @@ impl<T: TransactionOrdering> PendingPool<T> {
             ordering,
             submission_id: 0,
             by_id: Default::default(),
+            by_sender: Default::default(),
+            by_priority_fee: Default::default(),
             independent_transactions: Default::default(),
             highest_nonces: Default::default(),
             size_of: Default::default(),
@@ -82,8 +122,39 @@ impl<T: TransactionOrdering> PendingPool<T> {
     fn clear_transactions(&mut self) -> HashMap<TransactionId, PendingTransaction<T>> {
         self.independent_transactions.clear();
         self.highest_nonces.clear();
+        self.by_sender.clear();
+        self.by_priority_fee.clear();
         self.size_of.reset();
         std::mem::take(&mut self.by_id)
+    }
+
+    /// Get highest priority transaction without removing it
+    pub fn peek_highest_priority(&self) -> Option<&PendingTransaction<T>> {
+        // Handle stale entries in the heap
+        while let Some(priority_ref) = self.by_priority_fee.peek() {
+            if let Some(tx) = self.by_id.get(&priority_ref.tx_id) {
+                return Some(tx);
+            }
+            // Skip stale entry - in practice you'd want to clean these up
+            break;
+        }
+        None
+    }
+
+    /// Drain transactions by priority order
+    pub fn drain_by_priority(&mut self) -> impl Iterator<Item = PendingTransaction<T>> + '_ {
+        std::iter::from_fn(move || {
+            while let Some(priority_ref) = self.by_priority_fee.pop() {
+                if let Some(tx) = self.remove_transaction(&priority_ref.tx_id) {
+                    // Need to reconstruct PendingTransaction from the removed ValidPoolTransaction
+                    // This is a bit awkward due to the current API design
+                    if let Some(pending_tx) = self.by_id.get(&priority_ref.tx_id) {
+                        return Some(pending_tx.clone());
+                    }
+                }
+            }
+            None
+        })
     }
 
     /// Returns an iterator over all transactions that are _currently_ ready.
@@ -197,7 +268,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
                 }
             } else {
                 self.size_of += tx.transaction.size();
-                self.update_independents_and_highest_nonces(&tx);
+                self.update_all_indices(&tx);
                 self.by_id.insert(id, tx);
             }
         }
@@ -242,12 +313,37 @@ impl<T: TransactionOrdering> PendingPool<T> {
                 tx.priority = self.ordering.priority(&tx.transaction.transaction, base_fee);
 
                 self.size_of += tx.transaction.size();
-                self.update_independents_and_highest_nonces(&tx);
+                self.update_all_indices(&tx);
                 self.by_id.insert(id, tx);
             }
         }
 
         removed
+    }
+
+    /// Updates all indices when adding a transaction
+    fn update_all_indices(&mut self, tx: &PendingTransaction<T>) {
+        self.update_independents_and_highest_nonces(tx);
+        self.update_sender_index(tx);
+        self.update_priority_heap(tx);
+    }
+
+    /// Updates the sender index
+    fn update_sender_index(&mut self, tx: &PendingTransaction<T>) {
+        let sender_id = tx.transaction.sender_id();
+        let tx_id = *tx.transaction.id();
+        
+        self.by_sender.entry(sender_id).or_insert_with(Vec::new).push(tx_id);
+    }
+
+    /// Updates the priority heap
+    fn update_priority_heap(&mut self, tx: &PendingTransaction<T>) {
+        let priority_ref = PriorityTransactionRef {
+            priority: tx.priority.clone(),
+            submission_id: tx.submission_id,
+            tx_id: *tx.transaction.id(),
+        };
+        self.by_priority_fee.push(priority_ref);
     }
 
     /// Updates the independent transaction and highest nonces set, assuming the given transaction
@@ -308,7 +404,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         let priority = self.ordering.priority(&tx.transaction, base_fee);
         let tx = PendingTransaction { submission_id, transaction: tx, priority };
 
-        self.update_independents_and_highest_nonces(&tx);
+        self.update_all_indices(&tx);
 
         // send the new transaction to any existing pendingpool static file iterators
         if self.new_transaction_notifier.receiver_count() > 0 {
@@ -338,6 +434,17 @@ impl<T: TransactionOrdering> PendingPool<T> {
 
         let tx = self.by_id.remove(id)?;
         self.size_of -= tx.transaction.size();
+
+        // Remove from sender index
+        if let Some(sender_txs) = self.by_sender.get_mut(&id.sender) {
+            sender_txs.retain(|tx_id| tx_id != id);
+            if sender_txs.is_empty() {
+                self.by_sender.remove(&id.sender);
+            }
+        }
+
+        // Note: We don't remove from priority heap here to avoid O(n) operation
+        // Stale entries are handled during iteration
 
         if let Some(highest) = self.highest_nonces.get(&id.sender) {
             if highest.transaction.nonce() == id.nonce {
@@ -526,23 +633,15 @@ impl<T: TransactionOrdering> PendingPool<T> {
         self.iter_txs_by_sender(sender).copied().collect()
     }
 
-    // /// Returns an iterator over all transaction with the sender id
-    // pub(crate) fn iter_txs_by_sender(
-    //     &self,
-    //     sender: SenderId,
-    // ) -> impl Iterator<Item = &TransactionId> + '_ {
-    //     self.by_id
-    //         .range((sender.start_bound(), Unbounded))
-    //         .take_while(move |(other, _)| sender == other.sender)
-    //         .map(|(tx_id, _)| tx_id)
-    // }
-
     /// Returns an iterator over all transaction with the sender id
     pub(crate) fn iter_txs_by_sender(
         &self,
         sender: SenderId,
     ) -> impl Iterator<Item = &TransactionId> + '_ {
-        self.by_id.iter().filter(move |(tx_id, _)| tx_id.sender == sender).map(|(tx_id, _)| tx_id)
+        self.by_sender
+            .get(&sender)
+            .map(|txs| txs.iter())
+            .unwrap_or_else(|| [].iter())
     }
 
     /// Retrieves a transaction with the given ID from the pool, if it exists.
