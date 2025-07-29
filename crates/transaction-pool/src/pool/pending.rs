@@ -176,7 +176,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         blob_fee: u128,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
         // Create a collection for removed transactions.
-        let mut removed = Vec::new();
+        let mut removed = Vec::with_capacity(self.len());
 
         // Drain and iterate over all transactions.
         let mut transactions_iter = self.clear_transactions().into_iter().peekable();
@@ -218,7 +218,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         base_fee: u64,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
         // Create a collection for removed transactions.
-        let mut removed = Vec::new();
+        let mut removed = Vec::with_capacity(self.len());
 
         // Drain and iterate over all transactions.
         let mut transactions_iter = self.clear_transactions().into_iter().peekable();
