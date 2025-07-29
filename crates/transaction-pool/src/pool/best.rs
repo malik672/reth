@@ -83,7 +83,7 @@ impl<T: TransactionOrdering> Iterator for BestTransactionsWithFees<T> {
 pub struct BestTransactions<T: TransactionOrdering> {
     /// Contains a copy of _all_ transactions of the pending pool at the point in time this
     /// iterator was created.
-    pub(crate) all: HashMap<TransactionId, PendingTransaction<T>>,
+    pub(crate) all: BTreeMap<TransactionId, PendingTransaction<T>>,
     /// Transactions that can be executed right away: these have the expected nonce.
     ///
     /// Once an `independent` transaction with the nonce `N` is returned, it unlocks `N+1`, which
