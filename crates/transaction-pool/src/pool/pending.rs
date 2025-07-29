@@ -6,6 +6,7 @@ use crate::{
     },
     Priority, SubPoolLimit, TransactionOrdering, ValidPoolTransaction,
 };
+use ahash::AHashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     cmp::Ordering,
@@ -37,10 +38,10 @@ pub struct PendingPool<T: TransactionOrdering> {
     by_id: BTreeMap<TransactionId, PendingTransaction<T>>,
     /// The highest nonce transactions for each sender - like the `independent` set, but the
     /// highest instead of lowest nonce.
-    highest_nonces: FxHashMap<SenderId, PendingTransaction<T>>,
+    highest_nonces: AHashMap<SenderId, PendingTransaction<T>>,
     /// Independent transactions that can be included directly and don't require other
     /// transactions.
-    independent_transactions: FxHashMap<SenderId, PendingTransaction<T>>,
+    independent_transactions: AHashMap<SenderId, PendingTransaction<T>>,
     /// Keeps track of the size of this pool.
     ///
     /// See also [`reth_primitives_traits::InMemorySize::size`].
@@ -543,7 +544,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
 
     /// Returns a reference to the independent transactions in the pool
     #[cfg(test)]
-    pub(crate) const fn independent(&self) -> &FxHashMap<SenderId, PendingTransaction<T>> {
+    pub(crate) const fn independent(&self) -> &AHashMap<SenderId, PendingTransaction<T>> {
         &self.independent_transactions
     }
 

@@ -24,6 +24,7 @@ reth-storage-api.workspace = true
 reth-tasks.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
+ahash = "0.8.12"
 
 # ethereum
 alloy-eips = { workspace = true, features = ["kzg"] }
