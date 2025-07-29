@@ -118,7 +118,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         BestTransactions {
             all: self.by_id.clone(),
             independent_lookup,
-            independent: self.independent_transactions.values().cloned().collect(),
+            independent: independent,
             invalid: Default::default(),
             new_transaction_receiver: Some(self.new_transaction_notifier.subscribe()),
             skip_blobs: false,
