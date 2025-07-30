@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap, BTreeSet, BinaryHeap, HashMap},
+    collections::{hash_map::Entry, BTreeMap, BTreeSet},
     ops::{Bound::Unbounded, Deref},
     sync::Arc,
 };
@@ -25,10 +25,7 @@ pub struct ParkedPool<T: ParkedOrd> {
     /// This way we can determine when transactions were submitted to the pool.
     submission_id: u64,
     /// _All_ Transactions that are currently inside the pool grouped by their identifier.
-    by_id: FxHashMap<TransactionId, ParkedPoolTransaction<T>>,
-
-    /// Heap for ordering transactions by their priority
-    transaction_heap: BinaryHeap<TransactionId>,
+    by_id: BTreeMap<TransactionId, ParkedPoolTransaction<T>>,
     /// Keeps track of last submission id for each sender.
     ///
     /// This are sorted in reverse order, so the last (highest) submission id is first, and the
@@ -151,9 +148,9 @@ impl<T: ParkedOrd> ParkedPool<T> {
         &self,
         sender: SenderId,
     ) -> SmallVec<[TransactionId; TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER]> {
-          self.by_id
-            .iter()
-            .filter(|(tx_id, _)| tx_id.sender == sender)
+        self.by_id
+            .range((sender.start_bound(), Unbounded))
+            .take_while(move |(other, _)| sender == other.sender)
             .map(|(tx_id, _)| *tx_id)
             .collect()
     }
@@ -319,7 +316,6 @@ impl<T: ParkedOrd> Default for ParkedPool<T> {
         Self {
             submission_id: 0,
             by_id: Default::default(),
-             transaction_heap: Default::default(),
             last_sender_submission: Default::default(),
             sender_transaction_count: Default::default(),
             size_of: Default::default(),
