@@ -25,9 +25,7 @@ pub struct ParkedPool<T: ParkedOrd> {
     /// This way we can determine when transactions were submitted to the pool.
     submission_id: u64,
     /// _All_ Transactions that are currently inside the pool grouped by their identifier.
-    by_id: FxHashMap<TransactionId, ParkedPoolTransaction<T>>,
-
-    by_sender: FxHashMap<SenderId, SmallVec<[TransactionId; TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER]>>,
+    by_id: FxHashMap<SenderId, Vec<(TransactionId, ParkedPoolTransaction<T>)>>,
     /// Keeps track of last submission id for each sender.
     ///
     /// This are sorted in reverse order, so the last (highest) submission id is first, and the
@@ -62,14 +60,20 @@ impl<T: ParkedOrd> ParkedPool<T> {
         // keep track of size
         self.size_of += tx.size();
 
+        let sender_id = tx.sender_id();
         // update or create sender entry
-        self.add_sender_count(tx.sender_id(), submission_id);
+        self.add_sender_count(sender_id, submission_id);
         let transaction = ParkedPoolTransaction { submission_id, transaction: tx.into() };
 
-        self.by_id.insert(id, transaction);
-
-        let sender_txs = self.by_sender.entry(id.sender).or_insert_with(SmallVec::new);
-        sender_txs.push(id);
+        // Fix: Properly handle multiple transactions per sender
+        match self.by_id.entry(sender_id) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().push((id, transaction));
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(vec![(id, transaction)]);
+            }
+        }
     }
 
     /// Increments the count of transactions for the given sender and updates the tracked submission
@@ -129,7 +133,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
     pub(crate) fn all(
         &self,
     ) -> impl ExactSizeIterator<Item = Arc<ValidPoolTransaction<T::Transaction>>> + '_ {
-        self.by_id.values().map(|tx| tx.transaction.clone().into())
+        self.by_id.values().map(|tx| tx[0].1.transaction.clone().into())
     }
 
     /// Removes the transaction from the pool
@@ -137,24 +141,35 @@ impl<T: ParkedOrd> ParkedPool<T> {
         &mut self,
         id: &TransactionId,
     ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
-        // remove from queues
-        let tx = self.by_id.remove(id)?;
-        self.remove_sender_count(tx.transaction.sender_id());
+        // Fix: Handle multiple transactions per sender properly
+        let sender_txs = self.by_id.get_mut(&id.sender)?;
+
+        // Find and remove the specific transaction
+        let pos = sender_txs.iter().position(|(tx_id, _)| tx_id == id)?;
+        let (_, removed_tx) = sender_txs.remove(pos);
+
+        // If this was the last transaction for this sender, remove the sender entry
+        if sender_txs.is_empty() {
+            self.by_id.remove(&id.sender);
+        }
+
+        self.remove_sender_count(id.sender);
 
         // keep track of size
-        self.size_of -= tx.transaction.size();
+        self.size_of -= removed_tx.transaction.size();
 
-        Some(tx.transaction.into())
+        Some(removed_tx.transaction.clone().into())
     }
 
     /// Retrieves transactions by sender, using `SmallVec` to efficiently handle up to
     /// `TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER` transactions.
-    pub(crate) fn get_txs_by_sender(
+     pub(crate) fn get_txs_by_sender(
         &self,
         sender: SenderId,
     ) -> SmallVec<[TransactionId; TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER]> {
-        if let Some(sender_txs) = self.by_sender.get(&sender) {
-            sender_txs.clone()
+        if let Some(sender_txs) = self.by_id.get(&sender) {
+            // Fix: Return transaction IDs, not the full tuples
+            sender_txs.iter().map(|(id, _)| *id).collect()
         } else {
             SmallVec::new()
         }
@@ -242,12 +257,19 @@ impl<T: ParkedOrd> ParkedPool<T> {
 
     /// Returns `true` if the transaction with the given id is already included in this pool.
     pub(crate) fn contains(&self, id: &TransactionId) -> bool {
-        self.by_id.contains_key(id)
+        self.by_id.contains_key(&id.sender)
     }
 
     /// Retrieves a transaction with the given ID from the pool, if it exists.
     fn get(&self, id: &TransactionId) -> Option<&ParkedPoolTransaction<T>> {
-        self.by_id.get(id)
+        let x = self.by_id.get(&id.sender);
+
+        if x.is_none() {
+            return None
+        }
+
+        // unwrap is safe because we checked that the id exists
+        x.unwrap().iter().find(|(tx_id, _)| tx_id == id).map(|(_, tx)| tx)
     }
 
     /// Asserts that all subpool invariants
@@ -283,17 +305,17 @@ impl<T: PoolTransaction> ParkedPool<BasefeeOrd<T>> {
         {
             let mut iter = self.by_id.iter().peekable();
 
-            while let Some((id, tx)) = iter.next() {
-                if tx.transaction.transaction.max_fee_per_gas() < basefee {
+            while let Some((_id, tx)) = iter.next() {
+                if tx[0].1.transaction.transaction.max_fee_per_gas() < basefee {
                     // still parked -> skip descendant transactions
-                    'this: while let Some((peek, _)) = iter.peek() {
-                        if peek.sender != id.sender {
+                    'this: while let Some((_peek, tx_id)) = iter.peek() {
+                        if tx_id[0].0 != tx[0].0 {
                             break 'this
                         }
                         iter.next();
                     }
                 } else {
-                    transactions.push(*id);
+                    transactions.push(tx[0].0);
                 }
             }
         }
@@ -321,7 +343,6 @@ impl<T: ParkedOrd> Default for ParkedPool<T> {
         Self {
             submission_id: 0,
             by_id: Default::default(),
-            by_sender: Default::default(),
             last_sender_submission: Default::default(),
             sender_transaction_count: Default::default(),
             size_of: Default::default(),
