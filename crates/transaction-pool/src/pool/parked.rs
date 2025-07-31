@@ -141,19 +141,22 @@ impl<T: ParkedOrd> ParkedPool<T> {
         &mut self,
         id: &TransactionId,
     ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
-        // Fix: Handle multiple transactions per sender properly
-        let sender_txs = self.by_id.get_mut(&id.sender)?;
+        // Use fast lookup to find sender
+        let sender_id = id.sender;
 
-        // Find and remove the specific transaction
+        // Get mutable reference to sender's transactions
+        let sender_txs = self.by_id.get_mut(&sender_id)?;
+
+        // Find and remove the specific transaction using swap_remove for O(1) removal
         let pos = sender_txs.iter().position(|(tx_id, _)| tx_id == id)?;
-        let (_, removed_tx) = sender_txs.remove(pos);
+        let (_, removed_tx) = sender_txs.swap_remove(pos);
 
         // If this was the last transaction for this sender, remove the sender entry
         if sender_txs.is_empty() {
-            self.by_id.remove(&id.sender);
+            self.by_id.remove(&sender_id);
         }
 
-        self.remove_sender_count(id.sender);
+        self.remove_sender_count(sender_id);
 
         // keep track of size
         self.size_of -= removed_tx.transaction.size();
@@ -163,7 +166,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
 
     /// Retrieves transactions by sender, using `SmallVec` to efficiently handle up to
     /// `TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER` transactions.
-     pub(crate) fn get_txs_by_sender(
+    pub(crate) fn get_txs_by_sender(
         &self,
         sender: SenderId,
     ) -> SmallVec<[TransactionId; TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER]> {
