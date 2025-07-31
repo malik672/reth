@@ -243,7 +243,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
 
     /// Number of transactions in the entire pool
     pub(crate) fn len(&self) -> usize {
-        self.by_id.len()
+        self.by_id.values().map(|txs| txs.len()).sum()
     }
 
     /// Returns true if the pool exceeds the given limit
