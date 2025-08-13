@@ -144,14 +144,14 @@ impl<T: ParkedOrd> ParkedPool<T> {
 
     pub(crate) fn remove_transactions_batch(
         &mut self,
-        ids: &[TransactionId],
+        ids: &[(TransactionId, usize)],
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
         let mut removed = Vec::with_capacity(ids.len());
         let mut size_reduction = 0;
 
-        for id in ids {
+        for (id, size) in ids {
             if let Some(tx) = self.by_id.remove(id) {
-                size_reduction += tx.transaction.size();
+                size_reduction += size;
                 removed.push(tx.transaction.into());
             }
         }
@@ -210,8 +210,8 @@ impl<T: ParkedOrd> ParkedPool<T> {
     /// that sender, so this sorts senders by the last time they submitted a transaction in
     /// descending order. Senders that have least recently submitted a transaction are first.
     ///
-    /// Then, for each sender, all transactions for that sender are removed, until the pool limits
-    /// have been met.
+    /// Then, for each sender, transactions are pre-calculated and removed in batches using
+    /// [`Self::remove_transactions_batch`] for optimal performance. 
     ///
     /// Any removed transactions are returned.
     pub fn truncate_pool(
@@ -240,7 +240,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
             for (txid, size) in list.into_iter().rev() {
                     projected_size -= size;
                     projected_len -= 1;
-                    to_remove.push(txid);
+                    to_remove.push((txid, size));
 
                     if !limit.is_exceeded(projected_len, projected_size) {
                         break;

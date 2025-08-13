@@ -137,3 +137,8 @@ harness = false
 name = "canonical_state_change"
 required-features = ["test-utils", "arbitrary"]
 harness = false
+
+[[bench]]
+name = "batch_removal"
+required-features = ["test-utils", "arbitrary"]
+harness = false
