@@ -169,6 +169,19 @@ impl<T: ParkedOrd> ParkedPool<T> {
 
     /// Retrieves transactions by sender, using `SmallVec` to efficiently handle up to
     /// `TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER` transactions.
+    pub(crate) fn get_txs_and_sizes_by_sender(
+        &self,
+        sender: SenderId,
+    ) -> SmallVec<[(TransactionId, usize); TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER]> {
+        self.by_id
+            .range((sender.start_bound(), Unbounded))
+            .take_while(move |(other, _)| sender == other.sender)
+            .map(|(tx_id, tx)| (*tx_id, tx.transaction.size()))
+            .collect()
+    }
+
+    /// Retrieves transactions by sender, using `SmallVec` to efficiently handle up to
+    /// `TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER` transactions.
     pub(crate) fn get_txs_by_sender(
         &self,
         sender: SenderId,
@@ -176,9 +189,10 @@ impl<T: ParkedOrd> ParkedPool<T> {
         self.by_id
             .range((sender.start_bound(), Unbounded))
             .take_while(move |(other, _)| sender == other.sender)
-            .map(|(tx_id, _)| *tx_id)
+            .map(|(tx_id, _)| (*tx_id))
             .collect()
     }
+
 
     #[cfg(test)]
     pub(crate) fn get_senders_by_submission_id(
@@ -215,7 +229,7 @@ impl<T: ParkedOrd> ParkedPool<T> {
         {
             // NOTE: This will not panic due to `!last_sender_transaction.is_empty()`
             let sender_id = self.last_sender_submission.last().unwrap().sender_id;
-            let list = self.get_txs_by_sender(sender_id);
+            let list = self.get_txs_and_sizes_by_sender(sender_id);
 
             // Pre-calculate exactly which transactions to remove
             let mut to_remove = Vec::new();
@@ -223,16 +237,14 @@ impl<T: ParkedOrd> ParkedPool<T> {
             let mut projected_len = self.len();
 
             // Drop transactions from this sender until the pool is under limits
-            for txid in list.into_iter().rev() {
-                if let Some(tx) = self.by_id.get(&txid) {
-                    projected_size -= tx.transaction.size();
+            for (txid, size) in list.into_iter().rev() {
+                    projected_size -= size;
                     projected_len -= 1;
                     to_remove.push(txid);
 
                     if !limit.is_exceeded(projected_len, projected_size) {
                         break;
                     }
-                }
             }
 
             let mut removed_batch = self.remove_transactions_batch(&to_remove);
