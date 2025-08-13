@@ -142,6 +142,31 @@ impl<T: ParkedOrd> ParkedPool<T> {
         Some(tx.transaction.into())
     }
 
+    pub(crate) fn remove_transactions_batch(
+        &mut self,
+        ids: &[TransactionId],
+    ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
+        let mut removed = Vec::with_capacity(ids.len());
+        let mut size_reduction = 0;
+
+        for id in ids {
+            if let Some(tx) = self.by_id.remove(id) {
+                size_reduction += tx.transaction.size();
+                removed.push(tx.transaction.into());
+            }
+        }
+
+        // update size once
+        self.size_of -= size_reduction;
+
+        // Batch update sender counts
+        for tx in &removed {
+            self.remove_sender_count(tx.sender_id());
+        }
+
+        removed
+    }
+
     /// Retrieves transactions by sender, using `SmallVec` to efficiently handle up to
     /// `TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER` transactions.
     pub(crate) fn get_txs_by_sender(
@@ -192,16 +217,26 @@ impl<T: ParkedOrd> ParkedPool<T> {
             let sender_id = self.last_sender_submission.last().unwrap().sender_id;
             let list = self.get_txs_by_sender(sender_id);
 
+            // Pre-calculate exactly which transactions to remove
+            let mut to_remove = Vec::new();
+            let mut projected_size = self.size();
+            let mut projected_len = self.len();
+
             // Drop transactions from this sender until the pool is under limits
             for txid in list.into_iter().rev() {
-                if let Some(tx) = self.remove_transaction(&txid) {
-                    removed.push(tx);
-                }
+                if let Some(tx) = self.by_id.get(&txid) {
+                    projected_size -= tx.transaction.size();
+                    projected_len -= 1;
+                    to_remove.push(txid);
 
-                if !self.exceeds(&limit) {
-                    break
+                    if !limit.is_exceeded(projected_len, projected_size) {
+                        break;
+                    }
                 }
             }
+
+            let mut removed_batch = self.remove_transactions_batch(&to_remove);
+            removed.append(&mut removed_batch);
         }
 
         removed
