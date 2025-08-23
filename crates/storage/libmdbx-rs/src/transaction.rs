@@ -645,6 +645,23 @@ impl TransactionPtr {
             Self::ReadWrite(ptr) => ptr.txn_execute_renew_on_timeout(f),
         }
     }
+
+    /// Returns `true` if the transaction is timed out.
+    #[cfg(feature = "read-tx-timeouts")]
+    fn is_timed_out(&self) -> bool {
+        match self {
+            Self::ReadOnly(ptr) => ptr.is_timed_out(),
+            Self::ReadWrite(ptr) => ptr.is_timed_out(),
+        }
+    }
+
+    #[cfg(feature = "read-tx-timeouts")]
+    pub(crate) fn set_timed_out(&self) {
+        match self {
+            Self::ReadOnly(ptr) => ptr.set_timed_out(),
+            Self::ReadWrite(ptr) => ptr.set_timed_out(),
+        }
+    }
 }
 
 impl ReadOnlyTransactionPtr {
