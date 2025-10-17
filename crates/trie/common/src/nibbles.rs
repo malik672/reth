@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use arrayvec::ArrayVec;
 use derive_more::Deref;
 pub use nybbles::Nibbles;
 
@@ -28,10 +29,11 @@ impl reth_codecs::Compact for StoredNibbles {
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
-        for i in self.0.iter() {
-            buf.put_u8(i);
-        }
-        self.0.len()
+        // Optimize: bulk write instead of byte-by-byte iteration
+        // This avoids per-byte bounds checks and enables vectorization
+        let bytes = self.0.iter().collect::<ArrayVec<u8, 32>>();
+        buf.put_slice(&bytes);
+        bytes.len()
     }
 
     fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
@@ -78,14 +80,15 @@ impl reth_codecs::Compact for StoredNibblesSubKey {
     {
         assert!(self.0.len() <= 64);
 
-        // right-pad with zeros
-        for i in self.0.iter() {
-            buf.put_u8(i);
-        }
-        static ZERO: &[u8; 64] = &[0; 64];
-        buf.put_slice(&ZERO[self.0.len()..]);
+        // Optimize: bulk write instead of byte-by-byte iteration
+        let bytes = self.0.iter().collect::<ArrayVec<u8, 64>>();
+        buf.put_slice(&bytes);
 
-        buf.put_u8(self.0.len() as u8);
+        // Right-pad with zeros
+        static ZERO: &[u8; 64] = &[0; 64];
+        buf.put_slice(&ZERO[bytes.len()..]);
+
+        buf.put_u8(bytes.len() as u8);
         64 + 1
     }
 
