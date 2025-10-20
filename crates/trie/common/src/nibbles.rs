@@ -1,5 +1,4 @@
 use alloc::vec::Vec;
-use arrayvec::ArrayVec;
 use derive_more::Deref;
 pub use nybbles::Nibbles;
 
@@ -31,7 +30,7 @@ impl reth_codecs::Compact for StoredNibbles {
     {
         // Optimize: bulk write instead of byte-by-byte iteration
         // This avoids per-byte bounds checks and enables vectorization
-        let bytes = self.0.iter().collect::<ArrayVec<u8, 32>>();
+        let bytes = self.0.to_vec();
         buf.put_slice(&bytes);
         bytes.len()
     }
@@ -81,7 +80,7 @@ impl reth_codecs::Compact for StoredNibblesSubKey {
         assert!(self.0.len() <= 64);
 
         // Optimize: bulk write instead of byte-by-byte iteration
-        let bytes = self.0.iter().collect::<ArrayVec<u8, 64>>();
+        let bytes = self.0.to_vec();
         buf.put_slice(&bytes);
 
         // Right-pad with zeros

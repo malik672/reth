@@ -23,7 +23,6 @@ reth-codecs = { workspace = true, optional = true }
 alloy-rpc-types-eth = { workspace = true, optional = true }
 alloy-serde = { workspace = true, optional = true }
 
-arrayvec = "0.7"
 bytes = { workspace = true, optional = true }
 derive_more.workspace = true
 itertools = { workspace = true, features = ["use_alloc"] }
