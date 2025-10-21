@@ -1,0 +1,239 @@
+================================================================================
+WHILE LOOP COMPLETE FLOW - All Jumps and Branches
+================================================================================
+
+RUST SOURCE:
+    while self.index > 0 && &self.keys[self.index] > prefix {
+        self.index -= 1;
+    }
+
+================================================================================
+COMPLETE ASSEMBLY WITH ALL JUMP PATHS
+================================================================================
+
+[SETUP - LBB0_2]
+    ldp     x11, x8, [x0]           ; Load keys & index
+    cbz     x8, LBB0_25             ; If index == 0, skip to forward scan
+    ... setup registers ...
+    b       LBB0_6                  ; ← JUMP to loop start (first time only)
+
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         WHILE LOOP STARTS HERE                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+LBB0_6:  ← ★ LOOP ENTRY POINT (comes here every iteration)
+    ; Bounds check
+    cmp     x8, x9                  ; Compare: index < keys.len?
+    b.hs    LBB0_34                 ; ← JUMP #1: If out of bounds → PANIC
+
+    ; Load current key
+    ldr     x12, [x11, #24]         ; Load keys.data pointer
+    mul     x2, x8, x15             ; Calculate offset = index * 40
+    ldr     x2, [x12, x2]           ; Load keys[index].len
+
+    ; Calculate comparison length
+    sub     x3, x2, x2, lsr #1      ; x3 = key.len / 2
+    cmp     x14, x3                 ; Compare lengths
+    csel    x3, x14, x3, lo         ; x3 = min(prefix.len, key.len)
+    cmp     x3, #32                 ; Length > 32?
+    b.hi    LBB0_32                 ; ← JUMP #2: If >32 bytes → large compare
+
+    ; Setup byte comparison
+    mov     x4, x16                 ; x4 = pointer to key bytes
+    mov     x5, x13                 ; x5 = pointer to prefix bytes
+
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    BYTE-BY-BYTE COMPARISON LOOP                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+LBB0_9:  ← Byte comparison loop (nested inside while)
+    cbz     x3, LBB0_4              ; ← JUMP #3: If count == 0 → done, keys equal
+    sub     x3, x3, #1              ; Decrement byte counter
+
+    ; Load and compare one byte
+    ldrb    w6, [x12, x4]           ; Load byte from key
+    ldrb    w7, [x5], #-1           ; Load byte from prefix
+    sub     x4, x4, #1              ; Move to previous byte
+    cmp     w6, w7                  ; Compare bytes
+
+    b.eq    LBB0_9                  ; ← JUMP #4: If equal → LOOP back (compare next byte)
+    b.hi    LBB0_5                  ; ← JUMP #5: If key > prefix → decrement index
+
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│              WHILE LOOP CONTINUATION - DECREMENT INDEX                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+LBB0_5:  ← Reached when key > prefix (need to go backwards)
+    sub     x16, x16, #40           ; Adjust key pointer (previous key)
+    sub     x8, x8, #1              ; index -= 1  ← "self.index -= 1"
+    str     x8, [x0, #8]            ; Store new index back to struct
+    cbz     x8, LBB0_12             ; ← JUMP #6: If index == 0 → EXIT while loop
+
+    ; ★ NO EXPLICIT JUMP HERE - FALLS THROUGH TO LBB0_6 ★
+    ; This is how the while loop repeats!
+
+
+LBB0_12: ← EXIT point for while loop
+    cbz     x10, LBB0_26            ; Check prefix length
+    ; Continue to forward scan...
+
+
+================================================================================
+ITERATION FLOW DIAGRAM
+================================================================================
+
+FIRST ITERATION:
+────────────────
+    [Setup LBB0_2]
+         │
+         │ b LBB0_6 (JUMP - first time only)
+         ▼
+    ┌─────────────────────┐
+    │  LBB0_6             │ ← Load keys[index]
+    │  - Bounds check     │
+    │  - Load key         │
+    │  - Setup compare    │
+    └──────────┬──────────┘
+               │ (fall through)
+               ▼
+    ┌─────────────────────┐
+    │  LBB0_9             │ ← Compare bytes loop
+    │  - Load byte        │◄──┐
+    │  - Compare          │   │
+    │  - b.eq LBB0_9 ─────┘   │ Loop until bytes differ
+    └──────────┬──────────┘   │ or count == 0
+               │               │
+               │ b.hi LBB0_5 (if key > prefix)
+               ▼
+    ┌─────────────────────┐
+    │  LBB0_5             │ ← Decrement index
+    │  - index -= 1       │
+    │  - cbz → LBB0_12    │ (exit if index == 0)
+    └──────────┬──────────┘
+               │
+               │ (FALL THROUGH - no explicit jump!)
+               │
+               └──────────┐
+                          │
+SECOND ITERATION:         │
+────────────────          │
+                          ▼
+    ┌─────────────────────┐
+    │  LBB0_6             │ ← Back to loop start!
+    │  - Bounds check     │
+    │  - Load key         │
+    └──────────┬──────────┘
+               │
+              ...
+        (repeat forever until exit condition)
+
+
+================================================================================
+ALL POSSIBLE PATHS OUT OF THE WHILE LOOP
+================================================================================
+
+PATH 1: Index becomes 0
+    LBB0_5 → cbz x8, LBB0_12 → EXIT to forward scan
+    (Reached bottom of array)
+
+PATH 2: Keys equal in comparison
+    LBB0_9 → cbz x3, LBB0_4 → ...
+    (Found a key that matches or is <= prefix)
+
+PATH 3: Byte comparison shows key < prefix
+    LBB0_9 → cmp w6, w7 → not b.hi → fall through
+    (Found a key that is < prefix, stop going backward)
+
+PATH 4: Out of bounds (shouldn't happen)
+    LBB0_6 → b.hs LBB0_34 → PANIC
+    (Safety check failure)
+
+PATH 5: Large comparison (>32 bytes)
+    LBB0_6 → b.hi LBB0_32 → handle separately
+    (Different code path for large keys)
+
+
+================================================================================
+JUMP SUMMARY
+================================================================================
+
+JUMPS THAT CONTINUE THE WHILE LOOP:
+    b.eq LBB0_9     ← Inner byte loop (keeps comparing bytes)
+    b.hi LBB0_5     ← Found key > prefix, decrement and continue
+    (fall through)  ← From LBB0_5 back to LBB0_6 (MAIN LOOP!)
+
+JUMPS THAT EXIT THE WHILE LOOP:
+    cbz → LBB0_12   ← index became 0
+    cbz → LBB0_4    ← finished byte comparison (keys equal)
+    b.hs → LBB0_34  ← bounds check failed (panic)
+    b.hi → LBB0_32  ← large comparison path
+    (fall through)  ← key <= prefix, stop going backward
+
+
+================================================================================
+KEY INSIGHT: THE "FALL THROUGH" TRICK
+================================================================================
+
+Notice that LBB0_5 does NOT have an explicit jump back to LBB0_6!
+
+LBB0_5:
+    sub     x8, x8, #1       ; index -= 1
+    str     x8, [x0, #8]     ; Store it
+    cbz     x8, LBB0_12      ; Exit if 0
+    ; ← NO JUMP INSTRUCTION HERE!
+    ; The next instruction in memory IS LBB0_6
+    ; So execution just "falls through"
+
+LBB0_6:  ← Next instruction in memory
+    cmp     x8, x9
+    ...
+
+This is a common assembly optimization:
+- Saves a jump instruction
+- Better for branch prediction
+- Smaller code size
+- The compiler arranged the basic blocks so that the most common path
+  (continuing the loop) is a fall-through, not a jump
+
+
+================================================================================
+COMPLETE ITERATION TRACE EXAMPLE
+================================================================================
+
+Assume: index = 3, keys = ["aaa", "bbb", "ccc", "ddd"], prefix = "bbb"
+
+ITERATION 1: index = 3
+──────────────────────
+    LBB0_6: Load keys[3] = "ddd"
+    LBB0_9: Compare "ddd" vs "bbb"
+            'd' > 'b' → key > prefix
+            b.hi LBB0_5
+    LBB0_5: index = 3 - 1 = 2
+            cbz: index != 0, continue
+            (fall through to LBB0_6) ← LOOP!
+
+ITERATION 2: index = 2
+──────────────────────
+    LBB0_6: Load keys[2] = "ccc"
+    LBB0_9: Compare "ccc" vs "bbb"
+            'c' > 'b' → key > prefix
+            b.hi LBB0_5
+    LBB0_5: index = 2 - 1 = 1
+            cbz: index != 0, continue
+            (fall through to LBB0_6) ← LOOP!
+
+ITERATION 3: index = 1
+──────────────────────
+    LBB0_6: Load keys[1] = "bbb"
+    LBB0_9: Compare "bbb" vs "bbb"
+            'b' == 'b', 'b' == 'b', 'b' == 'b'
+            All bytes equal, x3 = 0
+            cbz x3, LBB0_4 ← EXIT LOOP!
+
+Result: Stopped at index = 1, ready to start forward scan from "bbb"
+
+
+================================================================================

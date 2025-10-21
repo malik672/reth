@@ -28,7 +28,7 @@ Lfunc_begin0:
 	mov	w0, #1
 	b	LBB0_31
 LBB0_2:
-	ldp	x11, x8, [x0]                                  
+	ldp	x11  , x8, [x0]                                  
 	cbz	x8, LBB0_25
 	mov	x13, x1
 	ldr	x10, [x13], #39

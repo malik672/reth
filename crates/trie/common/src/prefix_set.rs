@@ -205,7 +205,17 @@ impl PrefixSet {
             return true
         }
 
-        while self.index > 0 && &self.keys[self.index] > prefix {
+        // Early bounds check to help compiler eliminate redundant checks in loops
+        if self.index >= self.keys.len() {
+            self.index = 0;
+        }
+
+        while self.index > 0 {
+            // SAFETY: index is checked above and only decremented, so always valid
+            let key = unsafe { self.keys.get_unchecked(self.index) };
+            if key <= prefix {
+                break;
+            }
             self.index -= 1;
         }
 

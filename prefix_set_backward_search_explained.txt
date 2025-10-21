@@ -1,0 +1,632 @@
+================================================================================
+PrefixSet::contains - Backward Search Loop Explanation
+================================================================================
+
+RUST SOURCE CODE:
+--------------------------------------------------------------------------------
+while self.index > 0 && &self.keys[self.index] > prefix {
+    self.index -= 1;
+}
+--------------------------------------------------------------------------------
+
+PURPOSE:
+The PrefixSet maintains an index cursor that tracks position between calls.
+This backward search rewinds the cursor when the current key is GREATER than
+the search prefix, ensuring we start scanning from the correct position.
+
+Example:
+    keys = ["aaa", "bbb", "ccc", "ddd", "eee"]
+    self.index = 4 (pointing at "eee")
+    prefix = "ccc"
+
+    Backward search:
+    - keys[4] = "eee" > "ccc" → rewind to index 3
+    - keys[3] = "ddd" > "ccc" → rewind to index 2
+    - keys[2] = "ccc" >= "ccc" → stop! index = 2 is correct starting point
+
+    Now forward scan can start at index 2 to find matches.
+
+
+================================================================================
+PART 1: SETUP (LBB0_2) - Preparing for the Loop
+================================================================================
+
+WHY WE DO SETUP:
+The backward search compares nibbles byte-by-byte FROM THE END BACKWARDS.
+To do this efficiently, we need to pre-calculate:
+1. Where each nibble ends in memory
+2. How many bytes to compare
+3. The struct sizes and offsets
+
+--------------------------------------------------------------------------------
+
+LINE-BY-LINE SETUP:
+--------------------------------------------------------------------------------
+
+ldp     x11, x8, [x0]
+--------------------------------------------------------------------------------
+WHAT: Load two values from PrefixSet struct at once
+WHERE: x0 = pointer to PrefixSet
+RESULT:
+    x11 = self.keys (Arc<Vec<Nibbles>> pointer) at [x0 + 0]
+    x8  = self.index (current position) at [x0 + 8]
+
+RUST STRUCT:
+    struct PrefixSet {
+        keys: Arc<Vec<Nibbles>>,  // offset 0  → loaded into x11
+        index: usize,              // offset 8  → loaded into x8
+        all: bool,                 // offset 16
+    }
+
+WHY: Need keys array pointer and current index for the loop
+
+
+--------------------------------------------------------------------------------
+
+cbz     x8, LBB0_25
+--------------------------------------------------------------------------------
+WHAT: "Compare and Branch if Zero"
+CHECK: if x8 (self.index) == 0
+THEN: Jump to LBB0_25 (skip backward search, go straight to forward scan)
+
+WHY: If index is already 0, we're at the start of the array.
+     No point searching backward! Jump ahead to forward scan.
+
+OPTIMIZATION: Avoids executing the entire backward search when unnecessary.
+
+
+--------------------------------------------------------------------------------
+
+mov     x13, x1
+--------------------------------------------------------------------------------
+WHAT: Copy register
+FROM: x1 (function parameter = pointer to search prefix)
+TO: x13 (preserve for later use)
+
+WHY: x1 is a function argument register. We need to keep the prefix pointer
+     safe because we'll use x1 for other calculations. Save it to x13.
+
+
+--------------------------------------------------------------------------------
+
+ldr     x10, [x13], #39
+--------------------------------------------------------------------------------
+WHAT: "Load with Post-Increment"
+STEP 1: Load value at [x13] into x10
+        x10 = prefix.length (first 8 bytes of Nibbles struct)
+STEP 2: Add 39 to x13
+        x13 = x13 + 39
+
+RESULT:
+    x10 = prefix.length (how many nibbles in the prefix)
+    x13 = pointer to LAST byte of prefix.data (x13 + 39)
+
+WHY 39?
+    struct Nibbles {
+        length: usize,     // 8 bytes at offset 0
+        data: [u8; 32],    // 32 bytes at offset 8
+    }
+    Total = 40 bytes
+
+    After loading length at offset 0:
+    x13 + 8 = start of data
+    x13 + 8 + 31 = last byte of data
+    x13 + 39 = last byte of data
+
+    We need to point to the END because we compare BACKWARDS!
+
+
+--------------------------------------------------------------------------------
+
+ldr     x9, [x11, #32]
+--------------------------------------------------------------------------------
+WHAT: Load from keys array structure
+WHERE: [x11 + 32] = length of the keys vector
+RESULT: x9 = number of keys in the array
+
+Arc<Vec<Nibbles>> memory layout (simplified):
+    [x11 + 0]  = atomic reference count
+    [x11 + 8]  = weak count
+    [x11 + 16] = inner pointer to Vec
+    [x11 + 24] = Vec.ptr (data pointer)
+    [x11 + 32] = Vec.len ← THIS IS WHAT WE LOAD
+
+WHY: Need to know how many keys exist for bounds checking in the loop
+
+
+--------------------------------------------------------------------------------
+
+sub     x14, x10, x10, lsr #1
+--------------------------------------------------------------------------------
+WHAT: Subtract with right shift
+CALCULATION:
+    x10, lsr #1  = x10 >> 1 (logical shift right by 1 = divide by 2)
+    x14 = x10 - (x10 >> 1)
+
+EXAMPLE:
+    If x10 = 8:
+    x10 >> 1 = 4
+    x14 = 8 - 4 = 4
+
+RESULT: x14 ≈ prefix.length / 2
+
+WHY: Used to calculate minimum comparison length later.
+     When comparing two nibble arrays, we only compare min(len1, len2) bytes.
+     This pre-calculates half of the prefix length for the min() operation.
+
+OPTIMIZATION: Avoids a division instruction (shift is faster than divide)
+
+
+--------------------------------------------------------------------------------
+
+mov     w15, #40
+--------------------------------------------------------------------------------
+WHAT: Load immediate constant
+RESULT: w15 = 40
+
+WHY: sizeof(Nibbles) = 40 bytes
+     Used repeatedly to calculate offsets: keys[i] is at (i * 40) bytes
+
+
+--------------------------------------------------------------------------------
+
+mov     x12, #39
+--------------------------------------------------------------------------------
+WHAT: Load immediate constant
+RESULT: x12 = 39
+
+WHY: Offset to the LAST byte of a Nibbles struct (40 - 1 = 39)
+     Since we compare backwards, we need to point to the end
+
+
+--------------------------------------------------------------------------------
+
+madd    x16, x8, x15, x12
+--------------------------------------------------------------------------------
+WHAT: "Multiply-Add" instruction
+CALCULATION: x16 = (x8 * x15) + x12
+            x16 = (index * 40) + 39
+
+EXAMPLE:
+    If index = 3:
+    x16 = (3 * 40) + 39
+    x16 = 120 + 39
+    x16 = 159
+
+RESULT: x16 = byte offset to the LAST byte of keys[index].data
+
+MEMORY LAYOUT:
+    keys[0] at offset 0-39
+    keys[1] at offset 40-79
+    keys[2] at offset 80-119
+    keys[3] at offset 120-159  ← if index=3, x16=159 (last byte)
+
+WHY: We compare nibbles byte-by-byte from the END backwards.
+     This gives us the starting point for backward comparison.
+
+
+--------------------------------------------------------------------------------
+
+mov     w17, #32
+--------------------------------------------------------------------------------
+WHAT: Load immediate constant
+RESULT: w17 = 32
+
+WHY: Maximum size for SIMD comparison (2 x 16-byte NEON registers)
+     Used later to check if we can use fast SIMD path
+
+
+--------------------------------------------------------------------------------
+
+b       LBB0_6
+--------------------------------------------------------------------------------
+WHAT: Unconditional branch
+JUMP TO: LBB0_6 (start of loop condition check)
+
+WHY: Setup is complete, enter the backward search loop
+
+
+================================================================================
+SUMMARY OF SETUP - Register State Before Loop
+================================================================================
+
+x8  = self.index              (current position in keys array)
+x9  = keys.length             (total number of keys)
+x10 = prefix.length           (how many nibbles we're searching for)
+x11 = self.keys               (pointer to Arc<Vec<Nibbles>>)
+x12 = 39                      (constant: offset to last byte)
+x13 = &prefix.data[end]       (pointer to LAST byte of prefix)
+x14 = prefix.length / 2       (half length, for min() calculation)
+x15 = 40                      (constant: sizeof(Nibbles))
+x16 = offset to keys[index].data[end]  (pointer to LAST byte of current key)
+w17 = 32                      (constant: SIMD width)
+
+
+================================================================================
+PART 2: THE BACKWARD SEARCH LOOP
+================================================================================
+
+RUST SOURCE:
+    while self.index > 0 && &self.keys[self.index] > prefix {
+        self.index -= 1;
+    }
+
+LOOP STRUCTURE:
+    1. Check if index > 0 (if 0, exit loop)
+    2. Load keys[index]
+    3. Compare keys[index] with prefix byte-by-byte backwards
+    4. If keys[index] > prefix: decrement index, repeat
+    5. If keys[index] <= prefix: exit loop (found correct position)
+
+--------------------------------------------------------------------------------
+LOOP ENTRY: LBB0_6 (First Entry from Setup)
+--------------------------------------------------------------------------------
+
+LBB0_6:
+    cmp     x8, x9
+    b.hs    LBB0_34
+--------------------------------------------------------------------------------
+WHAT: Bounds check
+CHECK: x8 (index) >= x9 (keys.length)
+IF TRUE: Branch to LBB0_34 (panic! - out of bounds)
+
+WHY: Safety check - ensure index is valid before accessing keys[index]
+     Rust's bounds checking compiled into assembly
+
+
+--------------------------------------------------------------------------------
+
+    ldr     x12, [x11, #24]
+--------------------------------------------------------------------------------
+WHAT: Load data pointer from Vec
+WHERE: [x11 + 24] = pointer to actual keys data
+RESULT: x12 = &keys[0] (pointer to start of keys array)
+
+WHY: Need the base pointer to access individual keys
+
+
+--------------------------------------------------------------------------------
+
+    mul     x2, x8, x15
+--------------------------------------------------------------------------------
+WHAT: Multiply
+CALCULATION: x2 = x8 * x15 = index * 40
+RESULT: x2 = byte offset to keys[index] from start of array
+
+WHY: Arrays are contiguous in memory. Each Nibbles is 40 bytes.
+     To get keys[index], we need (index * 40) bytes from start.
+
+
+--------------------------------------------------------------------------------
+
+    ldr     x2, [x12, x2]
+--------------------------------------------------------------------------------
+WHAT: Load from computed offset
+WHERE: [x12 + x2] = [keys_data_ptr + (index * 40)]
+RESULT: x2 = keys[index].length
+
+MEMORY:
+    x12 points to keys[0]
+    x12 + (index * 40) points to keys[index].length (first field)
+
+WHY: Need the length of the current key to know how many bytes to compare
+
+
+--------------------------------------------------------------------------------
+
+    sub     x3, x2, x2, lsr #1
+--------------------------------------------------------------------------------
+WHAT: Calculate half of key length
+CALCULATION: x3 = x2 - (x2 >> 1) ≈ x2 / 2
+RESULT: x3 ≈ keys[index].length / 2
+
+WHY: Same trick as before - prepare for min(key.len, prefix.len) calculation
+
+
+--------------------------------------------------------------------------------
+
+    cmp     x14, x3
+    csel    x3, x14, x3, lo
+--------------------------------------------------------------------------------
+WHAT: "Conditional Select" - branchless min()
+STEP 1: cmp x14, x3         → compare prefix.len/2 vs key.len/2
+STEP 2: csel (select if lower/unsigned less)
+        If x14 < x3: x3 = x14 (use prefix length)
+        Else:        x3 = x3  (use key length)
+
+RESULT: x3 = min(prefix.length, key.length) / 2
+
+WHY: Can only compare as many bytes as the SHORTER of the two nibbles.
+     This is branchless - no jump, just conditional move (faster!)
+
+
+--------------------------------------------------------------------------------
+
+    cmp     x3, #32
+    b.hi    LBB0_32
+--------------------------------------------------------------------------------
+WHAT: Check if comparison length > 32
+IF TRUE: Jump to LBB0_32 (handle large comparisons separately)
+
+WHY: SIMD (NEON) efficiently handles up to 32 bytes.
+     If we need to compare more, use a different path.
+
+OPTIMIZATION: Separates small (fast SIMD) from large (general) comparisons
+
+
+--------------------------------------------------------------------------------
+
+    mov     x4, x16
+    mov     x5, x13
+--------------------------------------------------------------------------------
+WHAT: Copy pointers for comparison
+    x4 = x16 = pointer to last byte of keys[index].data
+    x5 = x13 = pointer to last byte of prefix.data
+
+WHY: x4 and x5 will be used as iterators in the byte comparison loop.
+     We're about to walk backwards through both arrays comparing bytes.
+
+
+--------------------------------------------------------------------------------
+BYTE-BY-BYTE COMPARISON LOOP: LBB0_9
+--------------------------------------------------------------------------------
+
+LBB0_9:
+    cbz     x3, LBB0_4
+--------------------------------------------------------------------------------
+WHAT: "Compare and Branch if Zero"
+CHECK: if x3 (remaining bytes to compare) == 0
+THEN: Jump to LBB0_4 (comparison complete, both are equal so far)
+
+WHY: Loop termination - if we've compared all bytes and they're equal,
+     we need to check the lengths to determine final ordering
+
+
+--------------------------------------------------------------------------------
+
+    sub     x3, x3, #1
+--------------------------------------------------------------------------------
+WHAT: Decrement counter
+BEFORE: x3 = remaining bytes to compare
+AFTER:  x3 = remaining - 1
+
+WHY: About to compare one byte, so reduce the count
+
+
+--------------------------------------------------------------------------------
+
+    ldrb    w6, [x12, x4]
+--------------------------------------------------------------------------------
+WHAT: "Load Byte"
+WHERE: [x12 + x4] = byte from keys[index].data
+       x12 = keys data pointer
+       x4 = offset to current byte (walking backwards)
+RESULT: w6 = one byte from current key
+
+WHY: Load one byte from the key for comparison
+
+
+--------------------------------------------------------------------------------
+
+    ldrb    w7, [x5], #-1
+--------------------------------------------------------------------------------
+WHAT: "Load Byte with Post-Decrement"
+STEP 1: Load byte at [x5] into w7 (byte from prefix.data)
+STEP 2: Subtract 1 from x5 (x5 = x5 - 1)
+
+RESULT:
+    w7 = one byte from prefix
+    x5 = pointer moved backward by 1 byte (ready for next iteration)
+
+WHY: Load prefix byte and auto-advance pointer for next loop iteration
+     Post-decrement because we're walking BACKWARDS through the array
+
+
+--------------------------------------------------------------------------------
+
+    sub     x4, x4, #1
+--------------------------------------------------------------------------------
+WHAT: Decrement pointer
+RESULT: x4 = x4 - 1 (move to previous byte in key)
+
+WHY: Mirror the prefix pointer - both walk backwards together
+
+
+--------------------------------------------------------------------------------
+
+    cmp     w6, w7
+--------------------------------------------------------------------------------
+WHAT: Compare the two bytes
+CHECK: key_byte (w6) vs prefix_byte (w7)
+
+Sets CPU flags:
+    - Z flag (zero) if equal
+    - C flag (carry) and others for greater/less comparisons
+
+
+--------------------------------------------------------------------------------
+
+    b.eq    LBB0_9
+--------------------------------------------------------------------------------
+WHAT: "Branch if Equal"
+IF: w6 == w7 (bytes match)
+THEN: Jump back to LBB0_9 (continue comparing next bytes)
+
+WHY: If bytes are equal, keep comparing. Haven't determined order yet.
+
+
+--------------------------------------------------------------------------------
+
+    b.hi    LBB0_5
+--------------------------------------------------------------------------------
+WHAT: "Branch if Higher (unsigned)"
+IF: w6 > w7 (key_byte > prefix_byte)
+THEN: Jump to LBB0_5 (decrement index and loop again)
+
+WHY: If keys[index] > prefix, we need to rewind index and check earlier keys.
+     This implements the "&& keys[index] > prefix" part of the loop condition.
+
+ELSE: Fall through (key <= prefix, exit backward search, go to forward scan)
+
+
+--------------------------------------------------------------------------------
+LOOP DECREMENT: LBB0_5 (Jumped to when key > prefix)
+--------------------------------------------------------------------------------
+
+LBB0_5:
+    sub     x16, x16, #40
+--------------------------------------------------------------------------------
+WHAT: Move pointer backward by one Nibbles struct
+BEFORE: x16 = offset to last byte of keys[index]
+AFTER:  x16 = offset to last byte of keys[index - 1]
+
+WHY: We're moving to the previous key (40 bytes earlier in memory)
+     Since each Nibbles is 40 bytes, subtract 40.
+
+
+--------------------------------------------------------------------------------
+
+    sub     x8, x8, #1
+--------------------------------------------------------------------------------
+WHAT: Decrement index
+BEFORE: x8 = self.index
+AFTER:  x8 = self.index - 1
+
+WHY: This implements "self.index -= 1" from the Rust loop
+
+
+--------------------------------------------------------------------------------
+
+    str     x8, [x0, #8]
+--------------------------------------------------------------------------------
+WHAT: "Store" - write back to memory
+WHERE: [x0 + 8] = self.index field in PrefixSet struct
+WRITE: x8 (new decremented index)
+
+WHY: Update the struct in memory so the new index persists.
+     Even though we have x8 in a register, we need to save it back
+     to the struct for it to be visible outside this function.
+
+
+--------------------------------------------------------------------------------
+
+    cbz     x8, LBB0_12
+--------------------------------------------------------------------------------
+WHAT: "Compare and Branch if Zero"
+CHECK: if x8 (new index) == 0
+THEN: Jump to LBB0_12 (exit backward search, start forward scan)
+
+WHY: This implements "while self.index > 0" from the Rust loop.
+     If index reached 0, we can't go backward anymore - exit loop!
+
+
+--------------------------------------------------------------------------------
+
+    [Jump back to LBB0_6 - loop continues]
+--------------------------------------------------------------------------------
+If index is still > 0, we fall through and jump back to LBB0_6 to:
+1. Check bounds
+2. Load keys[new_index]
+3. Compare with prefix again
+4. Repeat until keys[index] <= prefix or index == 0
+
+
+================================================================================
+COMPLETE LOOP FLOW DIAGRAM
+================================================================================
+
+        ┌─────────────────────────────────────────────┐
+        │  SETUP (LBB0_2)                             │
+        │  - Load keys, index, prefix                 │
+        │  - Calculate offsets and lengths            │
+        │  - Prepare registers                        │
+        └─────────────────┬───────────────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────────────┐
+        │  LBB0_6: Load Current Key                   │
+        │  - Bounds check (panic if out of bounds)    │
+        │  - Load keys[index].length                  │
+        │  - Calculate min(key.len, prefix.len)       │
+        └─────────────────┬───────────────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────────────┐
+        │  LBB0_9: Compare Bytes Loop                 │
+        │  - Load byte from key                       │
+        │  - Load byte from prefix                    │
+        │  - Compare bytes                            │
+        └─────┬───────────────┬───────────────────────┘
+              │               │
+              │ bytes equal   │ key_byte > prefix_byte
+              │               │
+              ▼               ▼
+          Continue      ┌─────────────────────┐
+          Loop          │  LBB0_5: Decrement  │
+                        │  - index -= 1       │
+                        │  - Update pointer   │
+                        │  - Store index      │
+                        └──────┬──────────────┘
+                               │
+                               │ index > 0?
+                               │
+                    ┌──────────┴──────────┐
+                    │ Yes                 │ No
+                    ▼                     ▼
+              Back to LBB0_6        Exit to Forward
+                                    Scan (LBB0_12)
+
+
+================================================================================
+WHY THIS DESIGN?
+================================================================================
+
+1. BACKWARD COMPARISON
+   Comparing from end-to-beginning is unusual but optimal here because:
+   - Hash prefixes often differ in later bytes
+   - Avoids comparing entire long keys when tails differ
+   - Early exit on first difference
+
+2. INDEX CURSOR OPTIMIZATION
+   Maintaining persistent index between calls exploits temporal locality:
+   - Sequential lookups often search nearby keys
+   - Avoids full binary search on every call
+   - Inspired by Silkworm's implementation (see PR #2417)
+
+3. BYTE-BY-BYTE vs SIMD
+   This is the fallback for small comparisons (<32 bytes)
+   - Simple loop is faster for <16 bytes than SIMD setup overhead
+   - Minimal branches in the hot path
+   - Modern CPUs handle tight loops well
+
+4. PRE-CALCULATED OFFSETS
+   All the setup calculations (x14, x16, etc.) avoid doing math in the loop:
+   - Loop body is minimal (just load, compare, branch)
+   - No multiplication or division in loop
+   - Registers stay hot in CPU caches
+
+
+================================================================================
+OPTIMIZATION OPPORTUNITIES
+================================================================================
+
+1. VECTORIZE THE BYTE LOOP
+   For lengths 4, 8, 16 bytes, could use SIMD instead of byte-by-byte:
+   - Load 4/8/16 bytes at once with ldr/ldp
+   - Compare with cmp/ccmp chains
+   - Would reduce loop iterations significantly
+
+2. LOOP UNROLLING
+   Manually unroll LBB0_9 to compare 2-4 bytes per iteration:
+   - Reduces branch overhead
+   - Better instruction-level parallelism
+   - Tradeoff: larger code size
+
+3. PREFETCHING
+   Could prefetch keys[index-1] while comparing keys[index]:
+   - Hides memory latency
+   - Helps when keys aren't in cache
+   - ARM has PRFM instruction for this
+
+
+================================================================================
