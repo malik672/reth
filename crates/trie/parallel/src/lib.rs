@@ -29,3 +29,7 @@ pub mod metrics;
 /// Proof task manager metrics.
 #[cfg(feature = "metrics")]
 pub mod proof_task_metrics;
+
+/// Adaptive thread pool scaling based on page fault rate monitoring.
+pub mod adaptive;
+pub use adaptive::{AdaptiveThreadController, PageFaultRate, PageFaultMonitor, PagingPressure};
