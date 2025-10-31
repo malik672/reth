@@ -16,7 +16,7 @@ use reth_trie_common::{
     proof::ProofNodes,
     updates::{StorageTrieUpdates, TrieUpdates},
     DecodedMultiProof, DecodedStorageMultiProof, MultiProof, Nibbles, RlpNode, StorageMultiProof,
-    TrieAccount, TrieMask, TrieNode, EMPTY_ROOT_HASH, TRIE_ACCOUNT_RLP_MAX_SIZE,
+    TrieAccount, TrieMask, TrieNode, EMPTY_ROOT_HASH,
 };
 use tracing::{instrument, trace};
 
@@ -39,7 +39,6 @@ where
         trie.state = trie.state.clear();
         trie.revealed_account_paths.clear();
         trie.storage.clear();
-        trie.account_rlp_buf.clear();
         Self(trie)
     }
 
@@ -89,8 +88,6 @@ pub struct SparseStateTrie<
     storage: StorageTries<S>,
     /// Flag indicating whether trie updates should be retained.
     retain_updates: bool,
-    /// Reusable buffer for RLP encoding of trie accounts.
-    account_rlp_buf: Vec<u8>,
     /// Metrics for the sparse state trie.
     #[cfg(feature = "metrics")]
     metrics: crate::metrics::SparseStateTrieMetrics,
@@ -107,7 +104,6 @@ where
             revealed_account_paths: Default::default(),
             storage: Default::default(),
             retain_updates: false,
-            account_rlp_buf: Vec::with_capacity(TRIE_ACCOUNT_RLP_MAX_SIZE),
             #[cfg(feature = "metrics")]
             metrics: Default::default(),
         }
@@ -745,9 +741,9 @@ where
 
         trace!(target: "trie::sparse", ?address, "Updating account");
         let nibbles = Nibbles::unpack(address);
-        self.account_rlp_buf.clear();
-        account.into_trie_account(storage_root).encode(&mut self.account_rlp_buf);
-        self.update_account_leaf(nibbles, self.account_rlp_buf.clone(), provider_factory)?;
+        let mut buf = Vec::new();
+        account.into_trie_account(storage_root).encode(&mut buf);
+        self.update_account_leaf(nibbles, buf, provider_factory)?;
 
         Ok(true)
     }
@@ -798,9 +794,9 @@ where
         // Otherwise, update the account leaf.
         trace!(target: "trie::sparse", ?address, "Updating account with the new storage root");
         let nibbles = Nibbles::unpack(address);
-        self.account_rlp_buf.clear();
-        trie_account.encode(&mut self.account_rlp_buf);
-        self.update_account_leaf(nibbles, self.account_rlp_buf.clone(), provider_factory)?;
+        let mut buf = Vec::new();
+        trie_account.encode(&mut buf);
+        self.update_account_leaf(nibbles, buf, provider_factory)?;
 
         Ok(true)
     }
